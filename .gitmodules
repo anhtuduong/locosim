@@ -52,3 +52,6 @@
 [submodule "robot_descriptions/tractor_description"]
 	path = robot_descriptions/tractor_description
 	url = git@github.com:mfocchi/tractor_description.git
+[submodule "ros_impedance_controller"]
+	path = ros_impedance_controller
+	url = git@github.com:anhtuduong/ros_impedance_controller.git
