@@ -52,3 +52,6 @@
 [submodule "ros_impedance_controller"]
 	path = ros_impedance_controller
 	url = git@github.com:anhtuduong/ros_impedance_controller.git
+[submodule "robot_control"]
+	path = robot_control
+	url = git@github.com:anhtuduong/robot_control.git
