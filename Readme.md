@@ -247,7 +247,7 @@ cd ~/ros_ws/
 Now you can clone the repository inside the ROS workspace you just created:
 
 ```
-git clone https://github.com/mfocchi/locosim.git
+git clone https://github.com/anhtuduong/locosim.git
 ```
 
 remember to update its submodules  (robot_control and ros_impedance_controller) running this command in the locosim root:
