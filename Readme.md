@@ -212,7 +212,10 @@ sudo apt install python3-pip
 PIP_PREFIX install cvxpy==1.2.0
 ```
 
-
+### Movit
+```
+sudo apt install ros-noetic-moveit
+```
 
 ### Download code and setup ROS workspace
 
