@@ -11,7 +11,6 @@ FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
-ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 # Ros utils
 import rospy as ros
@@ -37,7 +36,9 @@ import numpy as np
 from numpy import nan
 import tf
 import pinocchio as pin
-from utilities.Logger import Logger as log
+from motion.moveit_control import get_trajectory
+from motion.utils import list_to_Pose
+from utils_ur5.Logger import Logger as log
 
 # Services and messages
 from gazebo_msgs.srv import SetModelState
@@ -49,10 +50,13 @@ from gazebo_msgs.srv import ApplyBodyWrench
 from std_srvs.srv import Empty
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import WrenchStamped
+import geometry_msgs.msg
 from controller_manager_msgs.srv import SwitchControllerRequest, SwitchController
 from controller_manager_msgs.srv import LoadControllerRequest, LoadController
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, TriggerRequest
 from std_msgs.msg import Float64MultiArray
+from ros_impedance_controller.srv import generic_float
+from ros_impedance_controller.srv import MoveJoints, MoveTo
 
 # Constants
 from constants import *
@@ -87,12 +91,20 @@ class UR5Controller(threading.Thread):
         self.use_torque_control = True
 
         self.real_robot = conf.robot_params[self.robot_name]['real_robot']
+
+        if self.real_robot:
+            self.v_des = 0.2
+        else:
+            self.v_des = 0.6
+
+        self.dt = conf.robot_params[self.robot_name]['dt']
+
         self.homing_flag = True
 
         if (conf.robot_params[self.robot_name]['control_type'] == "torque"):
-            self.use_torque_control = 1
+            self.use_torque_control = True
         else:
-            self.use_torque_control = 0
+            self.use_torque_control = False
 
         if self.use_torque_control and self.real_robot:
             log.error('Cannot use ur5 in torque control mode')
@@ -100,12 +112,19 @@ class UR5Controller(threading.Thread):
 
         if conf.robot_params[self.robot_name]['gripper_sim']:
             self.gripper = True
+            self.grasping = False
         else:
             self.gripper = False
 
         self.controller_manager = ControllerManager(conf.robot_params[self.robot_name])
 
         self.world_name = WORLD_NAME
+
+        self.q_guess = {}
+        self.q_guess['pick'] = conf.robot_params[self.robot_name]['q_guess_pick']
+        self.q_guess['middle'] = conf.robot_params[self.robot_name]['q_guess_middle']
+        self.q_guess['place'] = conf.robot_params[self.robot_name]['q_guess_place']
+        self.bridge_trajectory = conf.robot_params[self.robot_name]['bridge_trajectory']
 
         log.info('UR5 CONTROLLER INITIALIZED ------------------')
 
@@ -260,6 +279,12 @@ class UR5Controller(threading.Thread):
         self.utils = Utils()
         self.utils.putIntoGlobalParamServer("gripper_sim", self.gripper)
 
+        # sevices to move robot arm
+        ros.Service('/ur5/move_joints', MoveJoints, self.move_joints_callback)
+        ros.Service('/ur5/move_to', MoveTo, self.move_to_callback)
+        ros.Service('/ur5/move_gripper', generic_float, self.move_gripper_callback)
+
+
     # --------------------------- #
     def initVars(self):
 
@@ -293,9 +318,6 @@ class UR5Controller(threading.Thread):
         self.time_log = np.empty((conf.robot_params[self.robot_name]['buffer_size'])) * nan
 
         self.log_counter = 0
-
-        self.ikin = robotKinematics(self.robot, conf.robot_params[self.robot_name]['ee_frame'])
-        self.init_guess = np.array([-0.32, -0.78, -2.56, -1.63, -1.57, 3.49]) #([0.4, -1.1,  1.0, -6.,  1,  1.0])
 
     # --------------------------- #
     def startupProcedure(self):
@@ -342,73 +364,14 @@ class UR5Controller(threading.Thread):
         """
         """
         # broadcast base world TF
-        self.broadcaster.sendTransform(self.base_offset, (0.0, 0.0, 0.0, 1.0), Time.now(), '/base_link', '/world')
+        # self.broadcaster.sendTransform(self.base_offset, (0.0, 0.0, 0.0, 1.0), Time.now(), '/base_link', '/world')
         v_ref = 0.0
 
         log.info('STARTING HOMING PROCEDURE')
 
-        self.q_des = np.copy(self.q)
-        log.debug(f'Initial joint error = {np.linalg.norm(self.q_des - q_home)}')
-        log.debug(f'q = {self.q.T}')
-        log.debug(f'Homing v des = {v_des}')
+        self.move_joints(dt, v_des, q_home, rate)
 
-        while True:
-            e = q_home - self.q_des
-            e_norm = np.linalg.norm(e)
-            if (e_norm != 0.0):
-                v_ref += 0.005 * (v_des - v_ref)
-                self.q_des += dt * v_ref * e / e_norm
-                self.controller_manager.sendReference(self.q_des)
-            rate.sleep()
-            if (e_norm < 0.001):
-                if self.gripper:
-                    self.controller_manager.gm.move_gripper(100)
-                self.homing_flag = False
-                log.info('HOMING PROCEDURE ACCOMPLISHED')
-                break
-
-    # --------------------------- #
-    def move_joints(self, dt, v_des, q_des, rate):
-        """
-        """
-        time_start = time.time()
-
-        # broadcast base world TF
-        self.broadcaster.sendTransform(self.base_offset, (0.0, 0.0, 0.0, 1.0), Time.now(), '/base_link', '/world')
-        v_ref = 0.0
-
-        log.debug_highlight(f'Starting movement:')
-        log.debug(f'From\t{self.q.T}')
-        log.debug(f'To\t{q_des.T}')
-
-        self.q_des = np.copy(self.q)
-        log.debug(f'velocity = {v_des}')
-        log.debug(f'initial joint error = {np.linalg.norm(self.q_des - q_des)}')
-
-        while True:
-            e = q_des - self.q_des
-            e_norm = np.linalg.norm(e)
-            if (e_norm != 0.0):
-                v_ref += 0.005 * (v_des - v_ref)
-                self.q_des += dt * v_ref * e / e_norm
-                self.controller_manager.sendReference(self.q_des)
-            rate.sleep()
-            if (e_norm < 0.001):
-                break
-        
-        log.debug_highlight(f'Finished movement in {time.time() - time_start:.2f} seconds')
-
-    # --------------------------- #
-    def move_to(self, position, orientation, dt, v_des, rate):
-        """
-        """
-        # q_des, _, _ = self.ikin.endeffectorFrameInverseKinematicsLineSearch(position, orientation, 'world')
-        q_des, IKsuccess, out_of_workspace = self.ikin.endeffectorInverseKinematicsLineSearch(position, 'hand_1_joint', self.init_guess)
-        log.debug(f'joint solution = {q_des}')
-        log.debug(f'IK success = {IKsuccess}')
-        log.debug(f'out of workspace = {out_of_workspace}')
-        # if IKsuccess:
-        self.move_joints(dt, v_des, q_des, rate)
+        log.info('HOMING PROCEDURE ACCOMPLISHED')
 
     # --------------------------- #
     def updateKinematicsDynamics(self):
@@ -445,12 +408,14 @@ class UR5Controller(threading.Thread):
         # take first 3 rows of J6 cause we have a point contact            
         self.J = self.J6[:3,:] 
         # broadcast base world TF
-        self.broadcaster.sendTransform(self.base_offset, (0.0, 0.0, 0.0, 1.0), Time.now(), '/base_link', '/world')
+        # self.broadcaster.sendTransform(self.base_offset, (0.0, 0.0, 0.0, 1.0), Time.now(), '/base_link', '/world')
 
     # --------------------------- #
     def _receive_jstate(self, msg):
         """
         """
+        self.ros_pub.joint_pub.publish(msg)
+
         for msg_idx in range(len(msg.name)):          
              for joint_idx in range(len(self.joint_names)):
                  if self.joint_names[joint_idx] == msg.name[msg_idx]: 
@@ -504,3 +469,106 @@ class UR5Controller(threading.Thread):
         # plotJoint('torque', time_log, self.time_log, self.q_log, self.q_des_log, self.qd_log, self.qd_des_log, None, None, self.tau_log,
         #         self.tau_ffwd_log, self.joint_names)
     
+    # --------------------------- #
+    def move_joints_callback(self, req):
+        """
+        """
+        self.move_joints(req.dt, req.v_des, req.q_des)
+        return True
+    
+    # --------------------------- #
+    def move_to_callback(self, req):
+        """
+        """
+        success = self.move_to(req.pose_target, req.dt, req.v_des)
+        return success
+    
+    # --------------------------- #
+    def move_gripper_callback(self, req):
+        """
+        """
+        self.move_gripper(req.data)
+        return True
+
+    # --------------------------- #
+    def move_joints(self, dt, v_des, q_des, verbose = True):
+        """
+        """
+        time_start = time.time()
+        
+        rate = ros.Rate(1/dt)
+
+        # broadcast base world TF
+        # self.broadcaster.sendTransform(self.base_offset, (0.0, 0.0, 0.0, 1.0), Time.now(), '/base_link', '/world')
+        v_ref = 0.0
+        
+        if verbose:
+            log.debug_highlight(f'Starting movement:')
+            log.debug(f'initial joint error = {np.linalg.norm(self.q_des - q_des)}')
+            log.debug(f'q = {self.q.T}')
+            log.debug(f'velocity = {v_des}')
+
+        self.q_des = np.copy(self.q)
+
+        while True:
+            e = q_des - self.q_des
+            e_norm = np.linalg.norm(e)
+            if (e_norm != 0.0):
+                v_ref += 0.005 * (v_des - v_ref)
+                self.q_des += dt * v_ref * e / e_norm
+                self.controller_manager.sendReference(self.q_des)
+            rate.sleep()
+            if (e_norm < 0.001):
+                break
+        
+        if verbose:
+            log.debug_highlight(f'Finished movement in {time.time() - time_start:.2f} seconds')
+
+        rate.sleep()
+
+    # --------------------------- #
+    def move_to(self, pose_target, dt, v_des, verbose = True):
+        """
+        """
+        pose_target = list_to_Pose(pose_target)
+        trajectory = get_trajectory(pose_target)
+
+        if trajectory is None:
+            log.error('Failed to get trajectory')
+            return False
+        
+        for point in trajectory.points:
+            q_des = np.array(point.positions)
+            self.move_joints(dt, v_des, q_des, verbose = False)
+
+        log.debug_highlight(f'Finished trajectory')
+        return True
+
+    # --------------------------- #
+    def move_gripper(self, diameter):
+        """
+        """
+        rate = ros.Rate(1/self.dt)
+        self.controller_manager.gm.move_gripper(diameter)
+        target = self.controller_manager.gm.q_des_gripper
+        count = 0
+        # Loop until the gripper is closed
+        while True:
+            self.controller_manager.sendReference(self.q_des)
+            current = self.controller_manager.gm.getDesGripperJoints()
+            log.debug_highlight(f'Try: {count}')
+            log.debug_highlight(f'Gripper target\t{target}')
+            log.debug(f'Gripper current\t{current}')
+            if (abs(current - target) < 0.01):
+                break
+            count += 1
+            rate.sleep()
+        log.info('Gripper done in {count} iterations')
+
+
+    # --------------------------- #
+    def get_ee_position_rotation(self):
+        """
+        """
+        return self.x_ee, self.w_R_tool0
+

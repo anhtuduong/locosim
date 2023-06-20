@@ -9,7 +9,43 @@
           package. Users CANNOT rely on this file being available, or stored in
           this location. Nor can they rely on the existence of the macro.
   -->
-  <!-- <xacro:include filename="$(find ur_description)/urdf/inc/tavolo.xacro"/> -->
+  <joint name="tavolo_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="tavolo_link"/>
+    <origin rpy="0 0 0" xyz="-0.5 -0.35 -1.75"/>
+  </joint>
+  <link name="tavolo_link">
+    <!-- Visual geometry -->
+    <visual name="visual">
+      <geometry>
+        <mesh filename="package://ur_description/meshes/tavolo/mesh/tavolo.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="LightGrey">
+        <color rgba="0.7 0.7 0.7 1.0"/>
+      </material>
+    </visual>
+    <!-- Base collision -->
+    <collision name="base_collision">
+      <origin rpy="0 0 0" xyz="0.5 0.4 0.85"/>
+      <geometry>
+        <box size="1 0.8 0.04"/>
+      </geometry>
+    </collision>
+    <!-- Box collision -->
+    <collision name="box_collision">
+      <origin rpy="0 0 0" xyz="0.5 0.08 0.95"/>
+      <geometry>
+        <box size="1 0.15 0.15"/>
+      </geometry>
+    </collision>
+    <!-- Back collision -->
+    <collision name="back_collision">
+      <origin rpy="1.57 0 0" xyz="0.5 -0.02 1.35"/>
+      <geometry>
+        <box size="1 1.0 0.04"/>
+      </geometry>
+    </collision>
+  </link>
   <transmission name="shoulder_pan_trans">
     <type>transmission_interface/SimpleTransmission</type>
     <joint name="shoulder_pan_joint">
@@ -821,6 +857,12 @@
   <!--		camera_plugin="true">  -->
   <!--		<origin xyz="0.0 -0.3 -0.5" rpy="0.0  0.5 1.57"/>-->
   <!--	</xacro:d435_camera>-->
+  <link name="world"/>
+  <joint name="world_joint" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin rpy="0 0 0" xyz="0.5 0.35 1.75"/>
+  </joint>
   <!--
     Attach the Gazebo model to Gazebo's world frame.
 
@@ -829,17 +871,6 @@
     here. Create a NEW xacro instead and decide whether you need to add
     a 'world' link there.
   -->
-  <link name="world"/>
-  <joint name="world_joint" type="fixed">
-    <parent link="world"/>
-    <child link="base_link"/>
-    <origin rpy="0 0 0" xyz="0 0 0"/>
-  </joint>
-  <!-- <joint name="tavolo_joint" type="fixed">
-    <parent link="world"/>
-    <child link="tavolo_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint> -->
   <!-- Configure self collision properties per link -->
   <gazebo reference="shoulder_link">
     <selfCollide>true</selfCollide>
