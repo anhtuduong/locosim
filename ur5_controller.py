@@ -552,18 +552,19 @@ class UR5Controller(threading.Thread):
         self.controller_manager.gm.move_gripper(diameter)
         target = self.controller_manager.gm.q_des_gripper
         count = 0
-        # Loop until the gripper is closed
+
         while True:
-            self.controller_manager.sendReference(self.q_des)
             current = self.controller_manager.gm.getDesGripperJoints()
-            log.debug_highlight(f'Try: {count}')
-            log.debug_highlight(f'Gripper target\t{target}')
-            log.debug(f'Gripper current\t{current}')
-            if (abs(current - target) < 0.01):
-                break
+            self.controller_manager.sendReference(self.q_des)
             count += 1
             rate.sleep()
-        log.info('Gripper done in {count} iterations')
+            if np.any(np.abs(target - current) < 0.001):
+                break
+        
+        current = self.controller_manager.gm.getDesGripperJoints()
+        log.info(f'Gripper moved: {count} steps')
+        log.debug(f'Gripper target\t{target}')
+        log.debug(f'Gripper current\t{current}')
 
 
     # --------------------------- #
