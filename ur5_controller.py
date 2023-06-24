@@ -36,7 +36,7 @@ import numpy as np
 from numpy import nan
 import tf
 import pinocchio as pin
-from motion.moveit_control import get_trajectory
+from motion.moveit_control import MoveitControl
 from motion.utils import list_to_Pose
 from utils_ur5.Logger import Logger as log
 
@@ -119,12 +119,6 @@ class UR5Controller(threading.Thread):
         self.controller_manager = ControllerManager(conf.robot_params[self.robot_name])
 
         self.world_name = WORLD_NAME
-
-        self.q_guess = {}
-        self.q_guess['pick'] = conf.robot_params[self.robot_name]['q_guess_pick']
-        self.q_guess['middle'] = conf.robot_params[self.robot_name]['q_guess_middle']
-        self.q_guess['place'] = conf.robot_params[self.robot_name]['q_guess_place']
-        self.bridge_trajectory = conf.robot_params[self.robot_name]['bridge_trajectory']
 
         log.info('UR5 CONTROLLER INITIALIZED ------------------')
 
@@ -279,11 +273,16 @@ class UR5Controller(threading.Thread):
         self.utils = Utils()
         self.utils.putIntoGlobalParamServer("gripper_sim", self.gripper)
 
+        # publish end effector pose
+        self.pub_ee_pose = ros.Publisher("/ur5/ee_pose", geometry_msgs.msg.Pose, queue_size=1, tcp_nodelay=True)
+
+        # start moveit control
+        self.moveit = MoveitControl()
+
         # sevices to move robot arm
         ros.Service('/ur5/move_joints', MoveJoints, self.move_joints_callback)
         ros.Service('/ur5/move_to', MoveTo, self.move_to_callback)
         ros.Service('/ur5/move_gripper', generic_float, self.move_gripper_callback)
-
 
     # --------------------------- #
     def initVars(self):
@@ -391,6 +390,8 @@ class UR5Controller(threading.Thread):
         # this is expressed in the base frame
         self.x_ee = self.robot.framePlacement(self.q, self.robot.model.getFrameId(frame_name)).translation
         self.w_R_tool0 = self.robot.framePlacement(self.q, self.robot.model.getFrameId(frame_name)).rotation
+        # publish end effector pose
+        self.pub_ee_pose.publish(self.get_ee_pose())
 
         if self.real_robot:
             # zed2_camera_center is the frame where point cloud is generated in REAL robot
@@ -473,25 +474,70 @@ class UR5Controller(threading.Thread):
     def move_joints_callback(self, req):
         """
         """
-        self.move_joints(req.dt, req.v_des, req.q_des)
+        joint_target = req.q_des
+        trajectory = self.moveit.get_trajectory(joint_target)
+
+        if trajectory is None:
+            log.error('Failed to get trajectory')
+            return False
+        
+        log.debug_highlight(f'Found trajectory. Starting movement')
+
+        for point in trajectory.points:
+            q_des = np.array(point.positions)
+            self.move_joints(req.dt, req.v_des, q_des, verbose=False)
+
+        log.info(f'Finished movement')
         return True
     
     # --------------------------- #
     def move_to_callback(self, req):
         """
         """
-        success = self.move_to(req.pose_target, req.dt, req.v_des)
-        return success
+        pose_target = list_to_Pose(req.pose_target)
+        trajectory = self.moveit.get_trajectory(pose_target)
+
+        if trajectory is None:
+            log.error('Failed to get trajectory')
+            return False
+        
+        log.debug_highlight(f'Found trajectory. Starting movement')
+
+        for point in trajectory.points:
+            q_des = np.array(point.positions)
+            self.move_joints(req.dt, req.v_des, q_des, verbose=False)
+
+        log.info(f'Finished movement')
+        return True
     
     # --------------------------- #
     def move_gripper_callback(self, req):
         """
         """
-        self.move_gripper(req.data)
+        diameter = req.data
+        rate = ros.Rate(1/self.dt)
+        self.controller_manager.gm.move_gripper(diameter)
+        target = self.controller_manager.gm.q_des_gripper
+
+        count = 0
+        while True:
+            current = self.controller_manager.gm.getDesGripperJoints()
+            self.controller_manager.sendReference(self.q_des)
+            count += 1
+            rate.sleep()
+            if np.any(np.abs(target - current) < 0.0001):
+                break
+            
+            # TODO: handle timeout
+        
+        current = self.controller_manager.gm.getDesGripperJoints()
+        log.info(f'Gripper moved: {count} iterations')
+        log.debug(f'Gripper target\t{target}')
+        log.debug(f'Gripper current\t{current}')
         return True
 
     # --------------------------- #
-    def move_joints(self, dt, v_des, q_des, verbose = True):
+    def move_joints(self, dt, v_des, q_des, verbose=True):
         """
         """
         time_start = time.time()
@@ -522,54 +568,26 @@ class UR5Controller(threading.Thread):
                 break
         
         if verbose:
-            log.debug_highlight(f'Finished movement in {time.time() - time_start:.2f} seconds')
+            log.info(f'Finished movement in {time.time() - time_start:.2f} seconds')
 
         rate.sleep()
 
     # --------------------------- #
-    def move_to(self, pose_target, dt, v_des, verbose = True):
+    def get_ee_pose(self):
         """
         """
-        pose_target = list_to_Pose(pose_target)
-        trajectory = get_trajectory(pose_target)
+        ee_pose = geometry_msgs.msg.Pose()
+        ee_pose.position.x = self.x_ee[0]
+        ee_pose.position.y = self.x_ee[1]
+        ee_pose.position.z = self.x_ee[2]
 
-        if trajectory is None:
-            log.error('Failed to get trajectory')
-            return False
-        
-        for point in trajectory.points:
-            q_des = np.array(point.positions)
-            self.move_joints(dt, v_des, q_des, verbose = False)
-
-        log.debug_highlight(f'Finished trajectory')
-        return True
-
-    # --------------------------- #
-    def move_gripper(self, diameter):
-        """
-        """
-        rate = ros.Rate(1/self.dt)
-        self.controller_manager.gm.move_gripper(diameter)
-        target = self.controller_manager.gm.q_des_gripper
-        count = 0
-
-        while True:
-            current = self.controller_manager.gm.getDesGripperJoints()
-            self.controller_manager.sendReference(self.q_des)
-            count += 1
-            rate.sleep()
-            if np.any(np.abs(target - current) < 0.001):
-                break
-        
-        current = self.controller_manager.gm.getDesGripperJoints()
-        log.info(f'Gripper moved: {count} steps')
-        log.debug(f'Gripper target\t{target}')
-        log.debug(f'Gripper current\t{current}')
-
-
-    # --------------------------- #
-    def get_ee_position_rotation(self):
-        """
-        """
-        return self.x_ee, self.w_R_tool0
-
+        # Create a 4x4 transformation matrix with the rotation matrix and zero translation
+        transformation_matrix = np.eye(4)
+        transformation_matrix[:3, :3] = self.w_R_tool0
+        # Convert the transformation matrix to a quaternion
+        rot = tf.transformations.quaternion_from_matrix(transformation_matrix)
+        ee_pose.orientation.x = rot[0]
+        ee_pose.orientation.y = rot[1]
+        ee_pose.orientation.z = rot[2]
+        ee_pose.orientation.w = rot[3]
+        return ee_pose
