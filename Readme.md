@@ -243,29 +243,7 @@ cd ~/ros_ws/
  catkin_make
 ```
 
-```
- cd ~/ros_ws/src/ 
-```
 
-Now you can clone the repository inside the ROS workspace you just created:
-
-```
-git clone https://github.com/anhtuduong/locosim.git
-```
-
-remember to update its submodules  (robot_control and ros_impedance_controller) running this command in the locosim root:
-
-```
-git submodule update --init --recursive
-```
-
-**IMPORTANT NOTE!** you will not be able to checkout the submodules unless you generate and add your SSH key to your Github account, as explained [here](https://github.com/mfocchi/lab-docker/blob/master/install_docker.md#installing-git-and-ssh-key).
-
-now recompile again (then this step won't bee needed anymore if you just work in python unless you do not modify / create additional ROS packages)
-
-```
-cd ~/ros_ws/ 
-```
 
 ```
  catkin_make install
